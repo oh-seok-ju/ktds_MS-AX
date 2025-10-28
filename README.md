@@ -1,4 +1,4 @@
-# AI 보안/교정/감사 Assistant
+# AI 보안/교정/감사(Governance) Assistant
 
 **"AI가 실시간으로 콘텐츠의 보안 위반 여부를 감지하고 조치까지 제안해주는 보안 감사 Agent"**
 
