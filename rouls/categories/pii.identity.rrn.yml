@@ -1,0 +1,14 @@
+id: "pii.identity.rrn"
+label_kr: "개인식별정보/주민등록번호"
+label_en: "PII/South Korean Resident Registration Number"
+severity: "critical"
+action: ["block", "mask", "cite_policy"]
+patterns:
+  - type: "regex"
+    id: "rrn_basic"
+    description_kr: "주민등록번호 기본 패턴"
+    description_en: "RRN basic pattern"
+    pattern: '(?<!\d)(\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])[- ]?[1-4]\d{6}(?!\d)'
+mask_ref: "rrn"
+suggestion_kr: "주민등록번호는 문서/프롬프트/코드에 직접 포함 금지. 식별자 대체 또는 완전 마스킹."
+suggestion_en: "Do not include RRN. Replace with surrogate ID or fully mask."

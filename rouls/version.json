@@ -1,0 +1,7 @@
+{
+  "rules_version": "1.0.0",
+  "schema_version": "2025-10",
+  "locale": ["ko-KR", "en-US"],
+  "owner": "secops",
+  "updated_at": "2025-10-27T00:00:00Z"
+}

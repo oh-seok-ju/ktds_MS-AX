@@ -1,0 +1,10 @@
+id: "confidential.internal_terms"
+label_kr: "내부기밀/프로젝트/계약정보"
+label_en: "Internal Confidential Terms"
+severity: "high"
+action: ["warn", "cite_policy"]
+# patterns는 필수 아님. 키워드는 아래 CSV로 병합됨(로더가 자동 주입).
+keywords: {}
+allowlist: ["샘플", "예시", "교육용"]
+suggestion_kr: "기밀 표기 및 단가/원가/마진 등 정량 정보 공유 금지. 필요 시 추상화."
+suggestion_en: "Do not share confidential markers or pricing. Use abstracted metadata."

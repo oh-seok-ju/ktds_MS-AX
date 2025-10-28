@@ -1,0 +1,9 @@
+id,label,keyword,severity
+conf.001,대외비,대외비,high
+conf.002,내부전용,내부전용,high
+conf.003,내부사용전용,internal-use-only,high
+deal.001,단가,단가,high
+deal.002,원가,원가,high
+deal.003,마진,마진,high
+sec.001,보안등급,보안등급,high
+sec.002,비공개,비공개,high

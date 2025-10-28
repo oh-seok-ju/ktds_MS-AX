@@ -1,0 +1,6 @@
+templates:
+  rrn: "{{yy}}{{mm}}{{dd}}-*******"
+  phone: "***-****-{{last4}}"
+  email_user_hash: "{{user_hash}}@{{domain}}"
+  secret: "<REDACTED_SECRET>"
+  ip_partial: "{{oct1}}.{{oct2}}.***.***"

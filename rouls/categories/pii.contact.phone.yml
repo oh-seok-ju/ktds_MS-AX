@@ -1,0 +1,15 @@
+
+id: "pii.contact.phone"
+label_kr: "연락처/전화번호"
+label_en: "Contact/Phone Number"
+severity: "high"
+action: ["warn", "mask"]
+patterns:
+  - type: "regex"
+    id: "kr_phone"
+    description_kr: "국내 휴대전화/유선번호"
+    description_en: "KR phone"
+    pattern: '(?<!\d)(?:0(?:2|[3-6][1-5]|70|10))[- ]?\d{3,4}[- ]?\d{4}(?!\d)'
+mask_ref: "phone"
+suggestion_kr: "전화번호는 최소한 부분 마스킹 처리 후 공유."
+suggestion_en: "Partially mask phone numbers before sharing."

@@ -1,0 +1,14 @@
+id: "pii.email"
+label_kr: "이메일 주소"
+label_en: "Email Address"
+severity: "medium"
+action: ["warn", "mask"]
+patterns:
+  - type: "regex"
+    id: "email"
+    description_kr: "일반 이메일 패턴"
+    description_en: "General email pattern"
+    pattern: '(?i)(?<![\w.])([\w.%+-]+)@([\w.-]+)\.(?:[A-Z]{2,})(?![\w.])'
+mask_ref: "email_user_hash"
+suggestion_kr: "사번/별칭 등 내부 식별자로 대체하거나 동의 후 공유."
+suggestion_en: "Replace with internal alias or obtain consent."

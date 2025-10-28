@@ -1,0 +1,8 @@
+id,label,keyword,severity
+conf.101,Confidential,confidential,high
+conf.102,InternalOnly,internal-only,high
+conf.103,NDA,nda,high
+conf.104,Proprietary,proprietary,high
+price.101,UnitPrice,unit price,high
+price.102,Cost,cost,high
+price.103,Margin,margin,high

@@ -1,0 +1,14 @@
+id: "network.ip"
+label_kr: "IP 주소"
+label_en: "IP Address"
+severity: "medium"
+action: ["warn", "mask"]
+patterns:
+  - type: "regex"
+    id: "ipv4"
+    description_kr: "IPv4 주소"
+    description_en: "IPv4 address"
+    pattern: '\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'
+mask_ref: "ip_partial"
+suggestion_kr: "사설/공용망 정보는 난독화 후 공유."
+suggestion_en: "Obfuscate network details before sharing."
