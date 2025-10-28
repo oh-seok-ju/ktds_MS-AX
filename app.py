@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 
 # 내부 모듈
 from core.loader import load_rules_from_blob
-from core.detector import detect, score, auto_mask
+from core.detector import detect, score, auto_mask, auto_mask_pairs
 from core.suggest_llm import suggest_after_mask  # 환경 미설정이면 None 반환
 from core.policy_search import search_snippets   # 환경 미설정이면 예외 -> 아래 try/except 처리
 
@@ -19,21 +19,23 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "config", ".env"
 # =========================
 # 유틸
 # =========================
+## 점수 기반 판정
 def decide_level(total_score: int, scoring: Dict[str, Any]) -> str:
-    block_th = scoring.get("block_threshold", 9)
+    block_th = scoring.get("block_threshold", 5)
     warn_th  = scoring.get("warn_threshold", 3)
     if total_score >= block_th:
-        return "block"
+        return "warn"
     if total_score >= warn_th:
         return "warn"
     return "allow"
 
+# 
 def render_hits(hits: List[Dict[str, Any]]):
     if not hits:
-        st.success("탐지 항목 없음 (룰 기반).")
+        # st.success("탐지 항목 없음 (룰 기반).")
         return
-    st.subheader("탐지 결과 (룰 기반)")
-    st.write(f"총 {len(hits)}건")
+    st.subheader("탐지 결과 (정책 기반)")
+    st.write(f"**총 {len(hits)}건**")
     st.table([
         {
             "category": h.get("id"),
@@ -44,6 +46,20 @@ def render_hits(hits: List[Dict[str, Any]]):
             "pattern_id": h.get("pattern_id","")
         } for h in hits
     ])
+
+def split_hits_for_actions(hits: List[Dict[str, Any]]):
+    """
+    hits: detector.detect() 결과 (각 hit에 action 리스트가 들어있다고 가정)
+    반환: (maskable, warn_only)
+    """
+    maskable, warn_only = [], []
+    for h in hits:
+        acts = set((h.get("action") or []))
+        if "mask" in acts:
+            maskable.append(h)
+        else:
+            warn_only.append(h)
+    return maskable, warn_only
 
 def llm_policy_query(hits: List[Dict[str, Any]]) -> str:
     """간단 생성: 감지된 카테고리를 기반으로 정책 검색 질의 구성"""
@@ -99,9 +115,40 @@ def run_analyzer_ui(kind: str):
     level = decide_level(total, rules.get("scoring", {}))
 
     render_hits(hits)
-    st.write(f"**Risk Score:** {total} → **판정:** `{level}`")
+    st.write(f"**Risk Score: {total}**  |  **`{level}`**")
 
-    # ✅ 탐지 항목이 없으면 추가 마스킹/LLM/근거 표시를 생략하고 종료
+    # 액션별로 분리
+    maskable, warn_only = split_hits_for_actions(hits)
+
+    # 마스킹 섹션: mask 대상이 있을 때만 표시
+    if maskable:
+        pairs = auto_mask_pairs(text, maskable, rules)
+        if pairs:
+            with st.expander("🔒 마스킹 대상 항목", expanded=True):
+                for before, after in pairs:
+                    st.code(f"{before}  →  {after}   (🔒 마스킹)", language="markdown" if kind == "email" else "python")
+        else:
+            st.info("마스킹 대상은 있으나 미리보기를 생성할 항목이 없습니다.")
+
+
+    # 비마스킹 섹션: 경고/권고만 표시
+    if warn_only:
+        with st.expander("⚠️ 삭제 권장", expanded=True):
+            for h in warn_only:
+                value = h.get("value")
+                suggestion = h.get("suggestion_kr") or h.get("suggestion_en") or "⚠️ 삭제 권장"
+                st.code(f"{value}   →   {suggestion}", language="markdown" if kind == "email" else "python")
+            # st.code([{
+            #     "category": h.get("id"),
+            #     "severity": h.get("severity"),
+            #     "action": ",".join(h.get("action") or []),
+            #     "value": h.get("value"),
+            #     # suggestion 필드가 hit에 없다면 detector에서 붙여주거나 아래 두 줄은 제거하세요.
+            #     "suggestion": h.get("suggestion_kr") or h.get("suggestion_en") or "-"
+            # } for h in warn_only])
+
+
+    # 탐지 항목이 없으면 추가 마스킹/LLM/근거 표시를 생략하고 종료
     if not hits:
         if level == "allow":
             st.success("탐지 항목 없음 → 현재 입력은 이미 안전한 것으로 판단됩니다. (추가 마스킹/조치 불필요)")
@@ -109,21 +156,10 @@ def run_analyzer_ui(kind: str):
             st.warning("탐지 항목은 없지만 점수 상 경고 임계치에 근접했습니다. 내용 재확인을 권장합니다.")
         else:  # block는 사실 hits 없으면 거의 안 나옵니다. 방어적 처리
             st.error("차단 등급으로 판정되었습니다.")
-        return  # ← 여기서 UI 흐름 종료 (아래 마스킹/LLM/RAG 섹션 표시 안 함)
+        # return  # ← 여기서 UI 흐름 종료 (아래 마스킹/LLM/RAG 섹션 표시 안 함)
 
 
-    masked = auto_mask(text, hits, rules)
-    with st.expander("마스킹 및 삭제를 권장합니다.", expanded=True):
-        st.code(masked, language="markdown" if kind == "email" else "python")
-
-    if level == "block":
-        st.error("차단 등급입니다. (룰 기반)")
-    elif level == "warn":
-        st.warning("경고 등급입니다. (룰 기반)")
-    else:
-        st.success("허용 등급입니다. (룰 기반)")
-
-    # 3) LLM 2차 검사 (옵션)
+    # 3) LLM 2차 검사 
     llm_result = None
     if do_llm:
         with st.spinner("AI 2차 검사/안전 리라이트 실행 중..."):
@@ -186,8 +222,8 @@ def run_analyzer_ui(kind: str):
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="SecureAssist (MVP)", page_icon="🛡️", layout="wide")
-st.title("🛡️(MVP) AI 보안/교정 Assistant")
+st.set_page_config(page_title="(MVP) AI Governance Assistant", page_icon="🛡️", layout="wide")
+st.title("🛡️ AI 보안/교정/감사 Assistant 🛡️")
 # st.caption("룰 기반 1차 필터 → AI 2차 감수 → AI Search 정책 근거 인용")
 
 tab1, tab2 = st.tabs(["📧 이메일 검사", "🧰 코드 검사"])

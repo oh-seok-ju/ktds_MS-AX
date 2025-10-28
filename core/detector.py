@@ -2,6 +2,7 @@
 from __future__ import annotations
 import re
 from typing import Dict, Any, List
+from typing import Tuple, Set
 
 # --- 내부 유틸 ---
 def _compile(pattern: str) -> re.Pattern:
@@ -92,6 +93,7 @@ def score(hits: List[Dict[str, Any]], rules: Dict[str, Any]) -> int:
     w = (rules.get("scoring") or {}).get("weights", {})
     return sum(w.get(h.get("severity", "low"), 0) for h in hits)
 
+## 마스크 부분
 def mask_text(text: str, hit: Dict[str, Any], rules: Dict[str, Any]) -> str:
     """
     해당 hit의 value를 rules의 mask.template로 치환
@@ -118,3 +120,51 @@ def auto_mask(text: str, hits: List[Dict[str, Any]], rules: Dict[str, Any]) -> s
         if any(a in ("mask", "block") for a in actions):
             out = mask_text(out, h, rules)
     return out
+
+## 비 마스크 부분
+def mask_value(value: str, hit: Dict[str, Any], rules: Dict[str, Any]) -> str:
+    """
+    단일 값(value)에 대해 해당 hit의 마스킹 템플릿을 적용한 결과를 반환.
+    auto_mask를 value 범위(0..len)로 한정해 재사용.
+    """
+    if not value:
+        return value
+    h2 = dict(hit)
+    h2["span"] = [0, len(value)]
+    return auto_mask(value, [h2], rules)
+
+def auto_mask_pairs(text: str, hits: List[Dict[str, Any]], rules: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    mask 대상 hit들만 받아, (before, after) 쌍 리스트를 만든다.
+    - hit.value가 없으면 span으로 원문에서 추출 시도
+    - (value, id, pattern_id) 중복은 1회만 포함
+    """
+    pairs: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, Any, Any]] = set()
+
+    # mask 액션만 대상으로
+    maskables = []
+    for h in hits:
+        acts = set((h.get("action") or []))
+        if "mask" in acts or "block" in acts:
+            maskables.append(h)
+
+    for h in maskables:
+        v = h.get("value")
+        if not v:
+            span = h.get("span")
+            if isinstance(span, (list, tuple)) and len(span) == 2 and all(isinstance(x, int) for x in span):
+                v = text[span[0]:span[1]]
+        if not v:
+            continue
+
+        key = (v, h.get("id"), h.get("pattern_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        after = mask_value(v, h, rules)
+        if after != v:  # 실제 변화가 있을 때만
+            pairs.append((v, after))
+
+    return pairs
