@@ -108,18 +108,18 @@ def mask_text(text: str, hit: Dict[str, Any], rules: Dict[str, Any]) -> str:
     masked = _apply_template(hit["value"], template, hit.get("groups") or {})
     return text.replace(hit["value"], masked)
 
-def auto_mask(text: str, hits: List[Dict[str, Any]], rules: Dict[str, Any]) -> str:
-    """
-    mask 또는 block 액션이 있는 항목만 템플릿 적용
-    긴 값부터 치환하여 중첩 교란 최소화
-    """
-    out = text
-    # 길이 내림차순
-    for h in sorted(hits, key=lambda x: len(x.get("value", "")), reverse=True):
-        actions = h.get("action") or []
-        if any(a in ("mask", "block") for a in actions):
-            out = mask_text(out, h, rules)
-    return out
+# def auto_mask(text: str, hits: List[Dict[str, Any]], rules: Dict[str, Any]) -> str:
+#     """
+#     mask 또는 block 액션이 있는 항목만 템플릿 적용
+#     긴 값부터 치환하여 중첩 교란 최소화
+#     """
+#     out = text
+#     # 길이 내림차순
+#     for h in sorted(hits, key=lambda x: len(x.get("value", "")), reverse=True):
+#         actions = h.get("action") or []
+#         if any(a in ("mask", "block") for a in actions):
+#             out = mask_text(out, h, rules)
+#     return out
 
 ## 비 마스크 부분
 def mask_value(value: str, hit: Dict[str, Any], rules: Dict[str, Any]) -> str:
@@ -168,3 +168,28 @@ def auto_mask_pairs(text: str, hits: List[Dict[str, Any]], rules: Dict[str, Any]
             pairs.append((v, after))
 
     return pairs
+
+## llm 결과 정규화
+# def ai_mask_pairs(llm_result: Dict[str, Any]) -> list[tuple[str, str]]:
+#     items = llm_result.get("masking_recommendations") or []
+#     pairs: List[Tuple[str, str]] = []
+#     for x in items:
+#         if isinstance(x, dict):
+#             b = x.get("before") or x.get("value") or x.get("text")
+#             a = x.get("after")  or x.get("masked") or x.get("suggested")
+#             if b and a:
+#                 pairs.append((b, a))
+#     return pairs
+
+def ai_warn_items(llm_result: Dict[str, Any]) -> list[tuple[str, str]]:
+    items = llm_result.get("residual_findings") or []
+    out: List[Tuple[str, str]] = []
+    for x in items:
+        if isinstance(x, dict):
+            v = x.get("value") or x.get("text")
+            s = x.get("suggestion") or x.get("suggestion_kr") or x.get("suggestion_en") or "⚠️ 삭제 권장"
+        else:
+            v = str(x); s = "⚠️ 삭제 권장"
+        if v:
+            out.append((v, s))
+    return out

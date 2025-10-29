@@ -4,12 +4,14 @@ import os
 import json
 import streamlit as st
 from typing import List, Dict, Any
+import requests
 
 # 내부 모듈
 from core.loader import load_rules_from_blob
-from core.detector import detect, score, auto_mask, auto_mask_pairs
-from core.suggest_llm import suggest_after_mask  # 환경 미설정이면 None 반환
+from core.detector import detect, score, auto_mask_pairs, ai_warn_items
+from core.suggest_llm import llm_after_mask  # 환경 미설정이면 None 반환
 from core.policy_search import search_snippets   # 환경 미설정이면 예외 -> 아래 try/except 처리
+from azure.storage.blob import BlobServiceClient
 
 from dotenv import load_dotenv
 # .env 파일 로드 (개발용)
@@ -71,9 +73,9 @@ def llm_policy_query(hits: List[Dict[str, Any]]) -> str:
 # =========================
 # 룰 로드 (Blob)
 # =========================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def _load_rules_cached() -> Dict[str, Any]:
-    # 환경변수로 Blob 연결 (RulesLoader 내부에서 처리)
+    """규칙을 Blob에서 로드 (5분간 캐시)"""
     rules = load_rules_from_blob()
     return rules
 
@@ -86,11 +88,9 @@ def run_analyzer_ui(kind: str):
     default_text = ""
     text = st.text_area("**입력 창(POC)**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
 
-    col_a, col_b, col_c = st.columns([1, 1, 1])
+    col_a, col_c = st.columns([1, 1])
     with col_a:
-        do_llm = st.toggle("AI 검사", value=True, key=f"toggle_llㄴm_{keyp}")
-    with col_b:
-        show_policy = st.toggle("정책 근거 보기", value=False, key=f"toggle_policy_{keyp}")
+        do_llm = st.toggle("AI 검사", value=True, key=f"toggle_llm_{keyp}")
     with col_c:
         run_btn = st.button("검사 실행", type="primary", use_container_width=True, key=f"run_{keyp}")
 
@@ -102,14 +102,18 @@ def run_analyzer_ui(kind: str):
         st.warning("분석할 텍스트가 비어 있습니다.")
         return
 
-    # 1) 룰 로드
+    # =========================
+    # # 1) 룰 로드 
+    # ========================
     try:
         rules = _load_rules_cached()
     except Exception as e:
         st.error(f"규칙 로드 실패: {e}")
         return
 
-    # 2) 룰 기반 탐지/점수/마스킹
+    # =========================
+    # # 2) 룰 기반 1차 검사
+    # ========================
     hits = detect(text, rules)
     total = score(hits, rules)
     level = decide_level(total, rules.get("scoring", {}))
@@ -130,7 +134,6 @@ def run_analyzer_ui(kind: str):
         else:
             st.info("마스킹 대상은 있으나 미리보기를 생성할 항목이 없습니다.")
 
-
     # 비마스킹 섹션: 경고/권고만 표시
     if warn_only:
         with st.expander("⚠️ 삭제 권장", expanded=True):
@@ -138,86 +141,100 @@ def run_analyzer_ui(kind: str):
                 value = h.get("value")
                 suggestion = h.get("suggestion_kr") or h.get("suggestion_en") or "⚠️ 삭제 권장"
                 st.code(f"{value}   →   {suggestion}", language="markdown" if kind == "email" else "python")
-            # st.code([{
-            #     "category": h.get("id"),
-            #     "severity": h.get("severity"),
-            #     "action": ",".join(h.get("action") or []),
-            #     "value": h.get("value"),
-            #     # suggestion 필드가 hit에 없다면 detector에서 붙여주거나 아래 두 줄은 제거하세요.
-            #     "suggestion": h.get("suggestion_kr") or h.get("suggestion_en") or "-"
-            # } for h in warn_only])
-
 
     # 탐지 항목이 없으면 추가 마스킹/LLM/근거 표시를 생략하고 종료
     if not hits:
         if level == "allow":
-            st.success("탐지 항목 없음 → 현재 입력은 이미 안전한 것으로 판단됩니다. (추가 마스킹/조치 불필요)")
+            st.success("✅추가 마스킹/조치 불필요 AI 검사로 상세 검사를 진행해 보세요!")
         elif level == "warn":
-            st.warning("탐지 항목은 없지만 점수 상 경고 임계치에 근접했습니다. 내용 재확인을 권장합니다.")
+            st.warning("⚠️탐지 항목은 없지만 점수 상 경고 임계치에 근접했습니다. 내용 재확인을 권장합니다.")
         else:  # block는 사실 hits 없으면 거의 안 나옵니다. 방어적 처리
-            st.error("차단 등급으로 판정되었습니다.")
-        # return  # ← 여기서 UI 흐름 종료 (아래 마스킹/LLM/RAG 섹션 표시 안 함)
+            st.error("🚫차단 등급으로 판정되었습니다.")
 
-
-    # 3) LLM 2차 검사 
+    # =========================
+    # # 3) LLM 2차 검사 및 정책 근거 인용
+    # ========================
     llm_result = None
     if do_llm:
-        with st.spinner("AI 2차 검사/안전 리라이트 실행 중..."):
-            try:
-                llm_result = suggest_after_mask(masked, hits, locale="ko-KR")
-            except Exception as e:
-                st.warning(f"AI 검사 실패(무시하고 계속): {e}")
-                llm_result = None
 
-        if llm_result:
-            st.subheader("AI 2차 검사 결과")
-            verdict = llm_result.get("verdict", "unknown")
-            st.write(f"**AI 판정:** `{verdict}`")
-            if llm_result.get("residual_findings"):
-                st.write("잔여 위험 항목:")
-                st.json(llm_result["residual_findings"])
-            if llm_result.get("masking_recommendations"):
-                st.write("마스킹 보강 권고:")
-                st.json(llm_result["masking_recommendations"])
-
-            safe_text = llm_result.get("safe_text")
-            if safe_text:
-                with st.expander("AI 안전 리라이트(safe_text)", expanded=False):
-                    st.code(safe_text, language="markdown" if kind == "email" else "python")
-
-            rationale = llm_result.get("rationale")
-            if rationale:
-                st.info(f"AI 안내 사유: {rationale}")
-
-    # 4) 정책 근거 (옵션)
-    if show_policy:
-        st.subheader("정책 근거 (Azure AI Search)")
-        q = llm_policy_query(hits)
-        st.caption(f"검색 질의: {q}")
         try:
-            snippets = search_snippets(q, top_k=3)
-            if snippets and isinstance(snippets, list) and not ("error" in (snippets[0] or {})):
-                for s in snippets:
-                    st.markdown(f"- **{s.get('title','(untitled)')}** — {s.get('snippet','')}")
+            # 정책 검색
+            with st.spinner("🔍 정책 근거 검색 중..."):
+                grounds = search_snippets(text, top_k=3)
+            
+            # 검색 결과 검증
+            has_valid_grounds = grounds and isinstance(grounds, list) and not grounds[0].get("error")
+            
+            if has_valid_grounds:
+                st.write("---")
             else:
-                err = snippets[0].get("error") if snippets else "검색 결과 없음"
-                st.warning(f"정책 검색 실패/없음: {err}")
+                grounds = None  # LLM에는 None 전달
+            
         except Exception as e:
-            st.warning(f"정책 검색 호출 실패(무시하고 계속): {e}")
+            print(f"[ERROR] 정책 찾는 중 오류: {e}") 
 
-    # 5) 후검증
-    if do_llm and llm_result and llm_result.get("safe_text"):
-        safe_text = llm_result["safe_text"]
-        re_hits = detect(safe_text, rules)
-        if re_hits:
-            st.error("⚠️ AI safe_text 재검사에서 민감 요소가 다시 탐지되었습니다.")
-            st.table([{
-                "category": h.get("id"),
-                "value": h.get("value"),
-                "severity": h.get("severity")
-            } for h in re_hits])
-        else:
-            st.success("AI safe_text 재검사: 추가 민감 요소 없음.")
+
+
+        # ===== LLM 호출 (정책 유무와 무관하게 실행) =====
+        try:
+            with st.spinner("🔍 AI 분석 중..."):
+                llm_result = llm_after_mask(text, grounds=grounds, locale="ko-KR")
+        
+                if not llm_result:
+                    llm_result = None
+        except Exception as e:
+            st.error(f"❌AI 검사 실패: {e}")
+            # =============================================
+    
+
+        # 결과 표시
+        if llm_result:
+            st.subheader("AI를 통한 2차 검사 결과")
+            verdict = llm_result.get("verdict", "unknown")
+            print(f"[DEBUG] LLM 결과: {llm_result}")
+            # 판정 결과 표시
+            if verdict == "allow":
+                st.success(f"**AI 판정:** ✅ `{verdict}` (문제 없음)")
+            elif verdict == "warn":
+                st.warning(f"**AI 판정:** ⚠️ `{verdict}` (주의 필요)")
+            else:
+                st.error(f"**AI 판정:** 🚫 `{verdict}` (차단 권장)")
+
+            # 권장 항목
+            ai_warns = ai_warn_items(llm_result)
+            if ai_warns:
+                with st.expander("⚠️🔒 삭제/마스킹/조치 권장 항목", expanded=True):
+                    for value, suggestion in ai_warns:
+                        st.code(f"{value}   →   {suggestion}", language="markdown" if kind=="email" else "python")
+
+            # 인용 근거 (정책이 있을 때만)
+            if has_valid_grounds:
+                cites = llm_result.get("policy_citations") or []
+                if cites:
+                    st.subheader("📎 인용(내부 정책)")
+                    
+                    by_key = {k: g for g in grounds 
+                            for k in [g.get("source"), g.get("title")] if k}
+                    
+                    seen_sources = set()
+                    for c in cites:
+                        source = c.get("source") or c.get("title")
+                        if source in seen_sources:
+                            continue
+                        seen_sources.add(source)
+                        
+                        ref = by_key.get(c.get("source")) or by_key.get(c.get("title"))
+                        title = c.get("title") or (ref or {}).get("title") or "내부 정책 문서"
+                        snippet = c.get("snippet") or (ref or {}).get("snippet", "")
+                        
+                        st.markdown(f"참고 정책 - **{title}**")
+                        if snippet:
+                            brief = snippet[:150] + ("…" if len(snippet) > 150 else "")
+                            st.info(brief)
+            else:
+                # 정책 없이 판단한 경우
+                print("[DEBUG] 정책 문서 없이 LLM 판단")
+                st.caption("💡 관련 정책 문서가 없어 일반 기준으로 분석했습니다.")    
 
 # =========================
 # Streamlit UI
@@ -231,30 +248,95 @@ tab1, tab2 = st.tabs(["📧 이메일 검사", "🧰 코드 검사"])
 with tab1:
     st.write("메일/메시지 본문 등을 입력해 검사합니다.")
     run_analyzer_ui(kind="email")
-
+       
 with tab2:
     st.write("코드/로그/설정 텍스트 등을 입력해 검사합니다.")
     run_analyzer_ui(kind="code")
 
 with st.sidebar:
-    # 상태 및 상태의 색상 선택
-    def status_text(ready: bool):
-        color = "blue" if ready else "red"
-        state = "Ready" if ready else "Stop"
-        return f"<span style='color:{color}'><b>{state}</b></span>"
+    st.header("💭 연결 상태")
+    
+    # ===== 연결 테스트 함수들 =====
+    @st.cache_data(ttl=60, show_spinner=False)  # 1분간 캐시
+    def test_blob_connection() -> bool:
+        """Azure Blob Storage 연결 테스트"""
+        try:
+            account_url  = os.getenv("AZURE_BLOB_ACCOUNT_URL")   
+            account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+            account_key  = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 
-    # env에 키 값 기준으로 준비 or 미준비 판단 (나중에 연동에 대한 걸로 수정 해보자~)
-    def is_valid_env(var_name: str) -> bool:
-        """빈 문자열, 'none', 'null'도 Stop 처리"""
-        value = os.getenv(var_name)
-        if not value:
+            if not all([account_url, account_name, account_key]):
+                return False
+
+            credential = {"account_name": account_name, "account_key": account_key}
+
+            client = BlobServiceClient(account_url=account_url, credential=credential)
+            client.get_service_properties()  # 아주 가벼운 핑 수준
+            return True
+
+        except Exception as e:
+            print(f"[DEBUG] Blob 연결 실패: {e}")
             return False
-        return value.strip().lower() not in ("none", "null", "")
+        
+    @st.cache_data(ttl=60, show_spinner=False)
+    def test_openai_connection() -> bool:
+        """Azure OpenAI 설정 유효성만 간단 확인 (실제 모델 호출 없음, 빠른 Ping 수준)"""
+        try:
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            key      = os.getenv("AZURE_OPENAI_KEY")
+            deploy   = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+            if not all([endpoint, key, deploy]):
+                return False
 
-    st.header("💭연결 상태")
-    st.markdown("**Azure Blob Storage**: " + status_text(is_valid_env("AZURE_BLOB_ACCOUNT_URL")), unsafe_allow_html=True)
-    st.markdown("**Azure OpenAI**: " + status_text(is_valid_env("AZURE_OPENAI_KEY")), unsafe_allow_html=True)
-    st.markdown("**Azure AI Search**: " + status_text(is_valid_env("AZURE_SEARCH_KEY")), unsafe_allow_html=True)
+            # 최소한의 endpoint 접근 확인 (HEAD / ping)
+            r = requests.head(endpoint, timeout=3)
+            return r.status_code < 400
+        except Exception as e:
+            print(f"[DEBUG] OpenAI ping 실패: {e}")
+            return False
 
-    st.divider()
-    st.caption("환경이 일부 미설정이어도 \n 기본 검사는 항상 동작합니다.")
+    @st.cache_data(ttl=60, show_spinner=False)
+    def test_search_connection() -> bool:
+        """Azure AI Search endpoint ping 확인"""
+        try:
+            endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
+            key      = os.getenv("AZURE_SEARCH_KEY")
+            if not all([endpoint, key]):
+                return False
+
+            import requests
+            r = requests.head(endpoint, timeout=3)
+            
+            # Azure Cognitive Search는 정상이어도 대부분 403/401을 반환 → 연결 정상으로 간주
+            return r.status_code in (200, 401, 403)
+        
+        except Exception as e:
+            print(f"[DEBUG] Search ping 실패: {e}")
+            return False
+
+    
+    # ===== 상태 표시 함수 =====
+    def status_badge(ready: bool, testing: bool = False):
+        if testing:
+            return "🔄 **테스트 중...**"
+        color = "green" if ready else "red"
+        emoji = "✅" if ready else "❌"
+        state = "Ready" if ready else "Failed"
+        return f":{color}[{emoji} **{state}**]"
+    
+
+    # Blob Storage
+    with st.spinner("Blob Storage 확인 중..."):
+        blob_ok = test_blob_connection()
+    st.markdown(f"**Azure Blob Storage:** {str(status_badge(blob_ok))}")
+    
+    # OpenAI
+    with st.spinner("OpenAI 확인 중..."):
+        openai_ok = test_openai_connection()
+    st.markdown(f"**Azure OpenAI:** {str(status_badge(openai_ok))}")
+    
+    # AI Search
+    with st.spinner("AI Search 확인 중..."):
+        search_ok = test_search_connection()
+    st.markdown(f"**Azure AI Search:**{str(status_badge(search_ok))}")
+    st.markdown("---")
