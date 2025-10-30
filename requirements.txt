@@ -1,19 +1,8 @@
-# --- UI ---
 streamlit>=1.39.0
-
-# --- YAML / JSON / CSV ---
 pyyaml>=6.0
-
-# --- Azure Blob + 자격증명 (rules/ 로드용 필수) ---
 azure-storage-blob>=12.19.0
-azure-identity>=1.16.0    # Managed Identity or DefaultAzureCredential 지원
-
-# --- Azure Cognitive Search (정책 스니펫 검색용, optional) ---
+azure-identity>=1.16.0
 azure-search-documents>=11.6.0
-
-# --- Azure OpenAI / LLM (2차 검사용, optional) ---
 openai>=1.37.0
-
-# (필요시 확장)
-# requests>=2.32.0
-# python-dotenv>=1.0.1
+requests>=2.32.0
+python-dotenv>=1.0.1

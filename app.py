@@ -5,70 +5,26 @@ import json
 import streamlit as st
 from typing import List, Dict, Any
 import requests
+import mimetypes
+from datetime import datetime
+from io import BytesIO
+
+from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents.indexes import SearchIndexerClient
 
 # 내부 모듈
 from core.loader import load_rules_from_blob
 from core.detector import detect, score, auto_mask_pairs, ai_warn_items
-from core.suggest_llm import llm_after_mask  # 환경 미설정이면 None 반환
+from core.suggest_llm import llm_after_mask, llm_after_mask_rag, llm_after_mask_rag2  # 환경 미설정이면 None 반환
 from core.policy_search import search_snippets   # 환경 미설정이면 예외 -> 아래 try/except 처리
-from azure.storage.blob import BlobServiceClient
+# 함수 모음 (시간 나면 함수 내부 정리) llm_policy_query
+from core.util import test_blob_connection, test_openai_connection, test_search_connection, status_badge, decide_level, render_hits, split_hits_for_actions, code_uploaded_text
 
 from dotenv import load_dotenv
 # .env 파일 로드 (개발용)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "config", ".env"))
 
-
-# =========================
-# 유틸
-# =========================
-## 점수 기반 판정
-def decide_level(total_score: int, scoring: Dict[str, Any]) -> str:
-    block_th = scoring.get("block_threshold", 5)
-    warn_th  = scoring.get("warn_threshold", 3)
-    if total_score >= block_th:
-        return "warn"
-    if total_score >= warn_th:
-        return "warn"
-    return "allow"
-
-# 
-def render_hits(hits: List[Dict[str, Any]]):
-    if not hits:
-        # st.success("탐지 항목 없음 (룰 기반).")
-        return
-    st.subheader("탐지 결과 (정책 기반)")
-    st.write(f"**총 {len(hits)}건**")
-    st.table([
-        {
-            "category": h.get("id"),
-            "type": h.get("type"),
-            "value": h.get("value"),
-            "severity": h.get("severity"),
-            "action": ",".join(h.get("action") or []),
-            "pattern_id": h.get("pattern_id","")
-        } for h in hits
-    ])
-
-def split_hits_for_actions(hits: List[Dict[str, Any]]):
-    """
-    hits: detector.detect() 결과 (각 hit에 action 리스트가 들어있다고 가정)
-    반환: (maskable, warn_only)
-    """
-    maskable, warn_only = [], []
-    for h in hits:
-        acts = set((h.get("action") or []))
-        if "mask" in acts:
-            maskable.append(h)
-        else:
-            warn_only.append(h)
-    return maskable, warn_only
-
-def llm_policy_query(hits: List[Dict[str, Any]]) -> str:
-    """간단 생성: 감지된 카테고리를 기반으로 정책 검색 질의 구성"""
-    if not hits:
-        return "민감정보/보안 위반 정책"
-    cats = sorted(set(h["id"] for h in hits if h.get("id")))
-    return " / ".join(cats) + " 정책 근거"
 
 # =========================
 # 룰 로드 (Blob)
@@ -84,9 +40,32 @@ def run_analyzer_ui(kind: str):
     kind: 'email' | 'code'
     """
     keyp = kind  # key prefix
-    ph = "안녕하세요, KTds 000 입니다. \n\n여기에 메일 내용을 작성하거나 복사해보세요! " if kind == "email" else "여기에 코드/로그/설정을 작성하거나 붙여 넣으세요..."
-    default_text = ""
-    text = st.text_area("**입력 창(POC)**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
+    # ph = "안녕하세요, KTds 000 입니다. \n\n여기에 메일 내용을 작성하거나 복사해보세요! " if kind == "email" else "여기에 코드/로그/설정을 작성하거나 붙여 넣으세요..."
+    # default_text = ""
+    # text = st.text_area("**입력 창(POC)**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
+
+    # === [변경] 입력부: email은 text_area, code는 file_uploader ===
+    if kind == "email":
+        ph = "안녕하세요, KTds 000 입니다. \n\n여기에 메일 내용을 작성하거나 복사해보세요!"
+        default_text = ""
+        text = st.text_area("**입력 창(POC)**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
+        source_name = "입력 텍스트"
+    else:
+        # st.caption("코드/로그/설정 파일을 업로드해 검사합니다. (.py/.log/.json/.yaml 등 텍스트 파일)")
+        uploaded = st.file_uploader(
+            "분석할 파일 업로드 (.py/.log/.json/.yaml 등 텍스트 파일)",
+            type=["txt", "py", "log", "json", "yaml", "yml", "cfg", "ini", "toml", ".env"],
+            accept_multiple_files=False,
+            key=f"uploader_{keyp}"
+        )
+        text = ""
+        source_name = ""
+        if uploaded:
+            source_name = uploaded.name
+            text = code_uploaded_text(uploaded)
+            # 파일명이 길 경우 축약 표시
+            shown_name = (source_name[:40] + "…") if len(source_name) > 40 else source_name
+            st.success(f"업로드됨: **{shown_name}**  | 사이즈: ~{len(text):,} chars")
 
     col_a, col_c = st.columns([1, 1])
     with col_a:
@@ -174,24 +153,34 @@ def run_analyzer_ui(kind: str):
             print(f"[ERROR] 정책 찾는 중 오류: {e}") 
 
 
-
         # ===== LLM 호출 (정책 유무와 무관하게 실행) =====
         try:
             with st.spinner("🔍 AI 분석 중..."):
+                # llm_result = llm_after_mask_rag(text, use_rag=True)
                 llm_result = llm_after_mask(text, grounds=grounds, locale="ko-KR")
-        
+
+                # ✅ Azure Search grounds 추출
+                if llm_result and '_azure_search_grounds' in llm_result:
+                    azure_grounds = llm_result.pop('_azure_search_grounds')  # 결과에서 제거하고 가져옴
+                    # 기존 grounds와 병합 (또는 대체)
+                    if not has_valid_grounds:
+                        grounds = azure_grounds
+                        has_valid_grounds = True
+                        print(f"[DEBUG] Azure Search에서 {len(azure_grounds)}개 정책 문서 참조")
+                
                 if not llm_result:
                     llm_result = None
         except Exception as e:
             st.error(f"❌AI 검사 실패: {e}")
-            # =============================================
-    
 
-        # 결과 표시
+        # =============================================
+        # 결과 표시 (기존 코드 그대로 사용)
+
         if llm_result:
-            st.subheader("AI를 통한 2차 검사 결과")
+            st.subheader("AI 정밀 검사 결과")
             verdict = llm_result.get("verdict", "unknown")
             print(f"[DEBUG] LLM 결과: {llm_result}")
+            
             # 판정 결과 표시
             if verdict == "allow":
                 st.success(f"**AI 판정:** ✅ `{verdict}` (문제 없음)")
@@ -207,14 +196,18 @@ def run_analyzer_ui(kind: str):
                     for value, suggestion in ai_warns:
                         st.code(f"{value}   →   {suggestion}", language="markdown" if kind=="email" else "python")
 
-            # 인용 근거 (정책이 있을 때만)
+            # ✅ 인용 근거 (has_valid_grounds로 판단)
             if has_valid_grounds:
                 cites = llm_result.get("policy_citations") or []
                 if cites:
                     st.subheader("📎 인용(내부 정책)")
                     
-                    by_key = {k: g for g in grounds 
-                            for k in [g.get("source"), g.get("title")] if k}
+                    # grounds를 검색 가능하도록 딕셔너리로 변환
+                    by_key = {}
+                    for g in grounds:
+                        for k in [g.get("source"), g.get("title")]:
+                            if k:
+                                by_key[k] = g
                     
                     seen_sources = set()
                     for c in cites:
@@ -224,7 +217,7 @@ def run_analyzer_ui(kind: str):
                         seen_sources.add(source)
                         
                         ref = by_key.get(c.get("source")) or by_key.get(c.get("title"))
-                        title = c.get("title") or (ref or {}).get("title") or "내부 정책 문서"
+                        title = c.get("title") or (ref or {}).get("title") or "AI의 생각"
                         snippet = c.get("snippet") or (ref or {}).get("snippet", "")
                         
                         st.markdown(f"참고 정책 - **{title}**")
@@ -234,8 +227,70 @@ def run_analyzer_ui(kind: str):
             else:
                 # 정책 없이 판단한 경우
                 print("[DEBUG] 정책 문서 없이 LLM 판단")
-                st.caption("💡 관련 정책 문서가 없어 일반 기준으로 분석했습니다.")    
+                st.caption("💡 관련 정책 문서가 없어 일반 기준으로 분석했습니다.")
 
+        # ===== LLM 호출 (정책 유무와 무관하게 실행) =====
+        # try:
+
+        #     with st.spinner("🔍 AI 분석 중..."):
+        #         # llm_result = llm_after_mask(text, grounds=grounds, locale="ko-KR")
+        #         llm_result = llm_after_mask_rag(text, use_rag=True)
+        #         if not llm_result:
+        #             llm_result = None
+        # except Exception as e:
+        #     st.error(f"❌AI 검사 실패: {e}")
+        #     # =============================================
+        #     # 결과 표시
+
+        # if llm_result:
+        #     st.subheader("AI 정밀 검사 결과")
+        #     verdict = llm_result.get("verdict", "unknown")
+        #     print(f"[DEBUG] LLM 결과: {llm_result}")
+        #     # 판정 결과 표시
+        #     if verdict == "allow":
+        #         st.success(f"**AI 판정:** ✅ `{verdict}` (문제 없음)")
+        #     elif verdict == "warn":
+        #         st.warning(f"**AI 판정:** ⚠️ `{verdict}` (주의 필요)")
+        #     else:
+        #         st.error(f"**AI 판정:** 🚫 `{verdict}` (차단 권장)")
+
+        #     # 권장 항목
+        #     ai_warns = ai_warn_items(llm_result)
+        #     if ai_warns:
+        #         with st.expander("⚠️🔒 삭제/마스킹/조치 권장 항목", expanded=True):
+        #             for value, suggestion in ai_warns:
+        #                 st.code(f"{value}   →   {suggestion}", language="markdown" if kind=="email" else "python")
+
+        #     # 인용 근거 (정책이 있을 때만)
+        #     if has_valid_grounds:
+        #         cites = llm_result.get("policy_citations") or []
+        #         if cites:
+        #             st.subheader("📎 인용(내부 정책)")
+                    
+        #             by_key = {k: g for g in grounds 
+        #                     for k in [g.get("source"), g.get("title")] if k}
+                    
+        #             seen_sources = set()
+        #             for c in cites:
+        #                 source = c.get("source") or c.get("title")
+        #                 if source in seen_sources:
+        #                     continue
+        #                 seen_sources.add(source)
+                        
+        #                 ref = by_key.get(c.get("source")) or by_key.get(c.get("title"))
+        #                 title = c.get("title") or (ref or {}).get("title") or "내부 정책 문서"
+        #                 snippet = c.get("snippet") or (ref or {}).get("snippet", "")
+                        
+        #                 st.markdown(f"참고 정책 - **{title}**")
+        #                 if snippet:
+        #                     brief = snippet[:150] + ("…" if len(snippet) > 150 else "")
+        #                     st.info(brief)
+        #     else:
+        #         # 정책 없이 판단한 경우
+        #         print("[DEBUG] 정책 문서 없이 LLM 판단")
+        #         st.caption("💡 관련 정책 문서가 없어 일반 기준으로 분석했습니다.")    
+
+        
 # =========================
 # Streamlit UI
 # =========================
@@ -256,75 +311,6 @@ with tab2:
 with st.sidebar:
     st.header("💭 연결 상태")
     
-    # ===== 연결 테스트 함수들 =====
-    @st.cache_data(ttl=60, show_spinner=False)  # 1분간 캐시
-    def test_blob_connection() -> bool:
-        """Azure Blob Storage 연결 테스트"""
-        try:
-            account_url  = os.getenv("AZURE_BLOB_ACCOUNT_URL")   
-            account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
-            account_key  = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
-
-            if not all([account_url, account_name, account_key]):
-                return False
-
-            credential = {"account_name": account_name, "account_key": account_key}
-
-            client = BlobServiceClient(account_url=account_url, credential=credential)
-            client.get_service_properties()  # 아주 가벼운 핑 수준
-            return True
-
-        except Exception as e:
-            print(f"[DEBUG] Blob 연결 실패: {e}")
-            return False
-        
-    @st.cache_data(ttl=60, show_spinner=False)
-    def test_openai_connection() -> bool:
-        """Azure OpenAI 설정 유효성만 간단 확인 (실제 모델 호출 없음, 빠른 Ping 수준)"""
-        try:
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            key      = os.getenv("AZURE_OPENAI_KEY")
-            deploy   = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-            if not all([endpoint, key, deploy]):
-                return False
-
-            # 최소한의 endpoint 접근 확인 (HEAD / ping)
-            r = requests.head(endpoint, timeout=3)
-            return r.status_code < 400
-        except Exception as e:
-            print(f"[DEBUG] OpenAI ping 실패: {e}")
-            return False
-
-    @st.cache_data(ttl=60, show_spinner=False)
-    def test_search_connection() -> bool:
-        """Azure AI Search endpoint ping 확인"""
-        try:
-            endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
-            key      = os.getenv("AZURE_SEARCH_KEY")
-            if not all([endpoint, key]):
-                return False
-
-            import requests
-            r = requests.head(endpoint, timeout=3)
-            
-            # Azure Cognitive Search는 정상이어도 대부분 403/401을 반환 → 연결 정상으로 간주
-            return r.status_code in (200, 401, 403)
-        
-        except Exception as e:
-            print(f"[DEBUG] Search ping 실패: {e}")
-            return False
-
-    
-    # ===== 상태 표시 함수 =====
-    def status_badge(ready: bool, testing: bool = False):
-        if testing:
-            return "🔄 **테스트 중...**"
-        color = "green" if ready else "red"
-        emoji = "✅" if ready else "❌"
-        state = "Ready" if ready else "Failed"
-        return f":{color}[{emoji} **{state}**]"
-    
-
     # Blob Storage
     with st.spinner("Blob Storage 확인 중..."):
         blob_ok = test_blob_connection()
@@ -339,4 +325,97 @@ with st.sidebar:
     with st.spinner("AI Search 확인 중..."):
         search_ok = test_search_connection()
     st.markdown(f"**Azure AI Search:**{str(status_badge(search_ok))}")
+    
+    # === 여기부터 추가: 업로드 타이틀은 항상 노출, 컨트롤은 blob_ok 일 때만 ===
+with st.sidebar:
     st.markdown("---")
+    st.subheader("📤 정책 문서 업로드")
+
+   # blob_ok 는 위에서 이미 계산된 값(Blob Storage 연결 상태)
+    if not blob_ok:
+        st.caption("⚠️ Blob 연결 준비 중이어서 업로드 컨트롤은 일시 숨김입니다.")
+    else:
+        # .env에서 업로드용 컨테이너 이름 읽기
+        policy_container = os.getenv("AZURE_BLOB_CONTAINER_POLICIES")
+        account_url  = os.getenv("AZURE_BLOB_ACCOUNT_URL")
+        account_name = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+        account_key  = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
+
+
+        # AI Search 관련 환경 변수
+        search_endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
+        search_key = os.getenv("AZURE_SEARCH_KEY")
+        indexer_name = os.getenv("AZURE_SEARCH_INDEXER_NAME")  # .env에 추가 필요
+
+        # # 📁 폴더 선택 라디오 버튼 추가
+        # folder_choice = st.radio(
+        #     "정책 저장 대상",
+        #     options=["email", "code"],
+        #     horizontal=True,
+        #     key="folder_selector"
+        # )
+
+
+    uploaded_files = st.file_uploader(
+        "정책 문서 파일을 선택하세요 (.pdf/.docx/.md/.txt 등)",
+        type=["pdf", "docx", "md", "txt", "html"],
+        accept_multiple_files=True,
+        key="policy_uploader"
+    )
+
+    if uploaded_files:
+        if st.button("업로드", use_container_width=True, key="btn_upload_policies"):
+            try:
+                credential = {"account_name": account_name, "account_key": account_key}
+                bsc = BlobServiceClient(account_url=account_url, credential=credential)
+                cc  = bsc.get_container_client(policy_container)
+
+                success, fail = 0, 0
+                time = datetime.now().strftime('%y%m%d%H%M%S')
+                progress = st.progress(0.0, text="업로드 준비 중...")
+                for idx, f in enumerate(uploaded_files, start=1):
+                    try:
+                        # 선택한 폴더 경로 + 파일명 + time
+                        # blob_name = f"{folder_choice}/{f.name}_{time}"
+                        blob_name = f"{f.name}_{time}"
+                        mime, _ = mimetypes.guess_type(f.name)
+                        content_settings = ContentSettings(content_type=mime or "application/octet-stream")
+
+                        # Streamlit UploadedFile 은 .read()로 바이트 획득
+                        cc.upload_blob(
+                            name=blob_name,
+                            data=f.read(),
+                            overwrite=True,
+                            content_settings=content_settings
+                        )
+                        success += 1
+                    except Exception as e:
+                        fail += 1
+                        st.error(f"업로드 실패: {f.name} - {e}")
+
+                    progress.progress(idx / len(uploaded_files), text=f"업로드 진행 {idx}/{len(uploaded_files)}")
+                
+                progress.empty()  # 진행바 제거
+
+                if success:
+                    # st.success(f"✅ 업로드 완료: {success}개 → `{folder_choice}/` 폴더")
+                    st.success(f"✅ 업로드 완료: {success}개 ")
+                    # 인덱서 재실행 진행
+                    try:
+                        with st.spinner("🔄 동기화 진행 중..."):
+                            indexer_client = SearchIndexerClient(
+                                endpoint=search_endpoint,
+                                credential=AzureKeyCredential(search_key)
+                            )
+                            indexer_client.run_indexer(indexer_name)
+                            st.success("✅ 동기화 완료! 잠시 후 반영됩니다.")
+
+                    # 인덱서 재실행 중 오류 발생시        
+                    except Exception as e:
+                        st.warning(f"⚠️ 인덱서 재실행 실패: {e}")
+                # 파일 업로드 실패 시
+                if fail:
+                    st.warning(f"⚠️ 업로드 실패: {fail}개")
+
+            except Exception as e:
+                st.error(f"업로드 중 오류: {e}")

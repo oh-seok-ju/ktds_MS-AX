@@ -1,5 +1,5 @@
 {
   "weights": { "critical": 10, "high": 6, "medium": 3, "low": 1 },
-  "block_threshold": 9,
+  "block_threshold": 5,
   "warn_threshold": 3
 }
