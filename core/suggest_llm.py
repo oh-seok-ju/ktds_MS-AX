@@ -30,6 +30,7 @@ def llm_after_mask(original_text: str,
         azure_endpoint=AZURE_OPENAI_ENDPOINT
     )
 
+    MAX_TOKENS_OUT = 1500  # [수정]
 
     system_prompt = (
         "You are a corporate security compliance assistant for code security auditing.\n"
@@ -139,7 +140,8 @@ def llm_after_mask(original_text: str,
 
         ],
         temperature=0.1,
-        response_format={"type": "json_object"}
+        response_format={"type": "json_object"},
+        max_tokens=MAX_TOKENS_OUT,
     )
 
     try:

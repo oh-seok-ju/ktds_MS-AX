@@ -1,14 +1,6 @@
-import os
-from dotenv import load_dotenv
-import db
 
-safe_api_key = os.getenv("OPENAI_API_KEY", "<KEY_REDIRECT_TOKEN>")
+safe_api_key = os.getenv("OPENAI_API_KEY")
 print("API Key loaded from environment.")
-
-api_key = 'aws-wdawd-dawdasdwd'
-
-user_ssn = "900101-1234567"
-account_number = "123-456-7890123"
 
 print(f"[DEBUG] User SSN: {user_ssn}, Account: {account_number}")
 
