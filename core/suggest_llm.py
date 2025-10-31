@@ -31,48 +31,6 @@ def llm_after_mask(original_text: str,
     )
 
 
-        #     "2. **Sensitive - WARN** (경고 수준):\n"
-        # "   - Names + partial contact info (e.g., '홍길동 010-1234-****')\n"
-        # "   - Internal project codenames (if explicitly marked confidential)\n"
-        # "   - Pricing information in negotiation context\n\n"
-        
-        # "3. **Sensitive - BLOCK** (차단 필수):\n"
-        # "   - Full SSN/RRN (주민등록번호 13자리)\n"
-        # "   - API Keys (especially starting with 'sk-', 'Bearer', etc.)\n"
-        # "   - Passwords, access tokens, secrets\n"
-        # "   - Full bank account numbers\n"
-        # "   - Complete credit card numbers\n\n"
-
-    # system_prompt = (
-    #     "You are a corporate security compliance assistant for a Korean enterprise.\n"
-    #     "Your role is to identify ONLY truly sensitive information that poses security risks.\n\n"
-    #     "답변은 무조건 한국어로 부탁해요.\n\n"
-
-    #     "=== STRICT RULES ===\n"
-    #     "1. **NOT Sensitive** (일반적인 사내 커뮤니케이션):\n"
-    #     "   - Employee names with job titles (e.g., 'ktds 홍길동 전임', '김과장님')\n"
-    #     "   - General greetings and business courtesy phrases\n"
-    #     "   - Project names that are already public or internal-only but not confidential\n\n"
-        
-    #     "=== OUTPUT FORMAT ===\n"
-    #     "Return JSON only:\n"
-    #     "{\n"
-    #     "  \"verdict\": \"allow\" | \"warn\" | \"block\",\n"
-    #     "  \"residual_findings\": [{\"value\": string, \"reason\": string, \"suggestion\": string}],\n"
-    #     "  \"masking_recommendations\": [{\"before\": string, \"after\": string, \"reason\": string}],\n"
-    #     "  \"safe_text\": string,\n"
-    #     "  \"rationale\": string,\n"
-    #     "  \"policy_citations\": [{\"source\": string, \"page\": number, \"snippet\": string}]\n"
-    #     "}\n\n"
-        
-    #     "=== CRITICAL GUIDELINES ===\n"
-    #     "- When in doubt, choose 'allow' over 'warn'\n"
-    #     "- Only cite policies (policy_citations) that DIRECTLY support your decision\n"
-    #     "- Never duplicate the same source in policy_citations\n"
-    #     "- Snippet must be <50 characters and directly relevant\n"
-    #     "- Korean workplace culture: mentioning colleague names is normal, not sensitive\n"
-    # )
-
     system_prompt = (
         "You are a corporate security compliance assistant for code security auditing.\n"
         "Your role is to identify security vulnerabilities and hardcoded secrets in source code.\n\n"
@@ -125,10 +83,10 @@ def llm_after_mask(original_text: str,
         "  \"masking_recommendations\": [{\"before\": string, \"after\": string, \"reason\": string}],\n"
         "  \"safe_text\": string,\n"
         "  \"rationale\": string,\n"
-        "  \"policy_citations\": [{\"source\": string, \"page\": number, \"snippet\": string}]\n"
         "}\n"
         "- code block( ``` )으로 감싸지 말고 JSON만 출력.\n"
-        "- 'policy_citations'는 실제 참고(RAG)한 문서만 포함.\n\n"
+        "- CRITICAL: policy_citations는 생성하지 마세요. 시스템이 자동으로 추가합니다.\n"
+        "- 검색된 정책 문서는 rationale에 자연스럽게 언급만 하세요.\n"
 
         "=== 판정 가이드라인 ===\n"
         "- 알려진 접두어(sk-, AKIA, ghp_, Bearer) 또는 라벨+리터럴(고엔트로피, 길이≥8)이면 원칙적으로 'block'.\n"
@@ -152,7 +110,6 @@ def llm_after_mask(original_text: str,
         "- 정책 문서의 패턴을 **반드시** 모두 검사하세요\n"
         "- 정책 문서에 명시된 내용을 우선적으로 참고하세요\n"
         "- 정책 문서에 없지만 보안 규정 위반이라고 생각한다면 안내 해주고 해당 내용 옆에 # 쓰고 'AI 자체 판단' 이라고 써주세요\n"
-        "- policy_citations는 실제로 참고한 정책만 포함\n"
     )
 
     payload = {
@@ -197,6 +154,7 @@ def llm_after_mask(original_text: str,
 # @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 def llm_after_mask_rag(original_text: str,
     locale: str = "ko-KR",
+    grounds: Optional[List[Dict[str, Any]]] = None,   # RAG 검색 스니펫
     use_rag: bool = True  # RAG 사용 여부
 ) -> Optional[Dict[str, Any]]:
     
@@ -223,6 +181,12 @@ def llm_after_mask_rag(original_text: str,
         "You are a corporate security compliance assistant for code security auditing.\n"
         "Your role is to identify security vulnerabilities and hardcoded secrets in source code.\n\n"
         "답변은 무조건 한국어로.\n\n"
+
+        "=== CRITICAL: 정책 문서 우선 원칙 ===\n"
+        "- Azure Search에서 검색된 정책 문서가 있으면 **반드시 그 내용을 우선 참조**하세요\n"
+        "- 검색된 문서에 관련 내용이 없을 때만 일반 보안 지식을 사용하세요\n"
+        "- rationale 작성 시 '검색된 정책 문서에 따르면...' 형태로 명시하세요\n"
+        "- 외부 출처(CERT, OWASP 등)는 검색 결과가 전혀 없을 때만 참조하세요\n\n"
 
         "=== SECURITY CHECKS (무조건 점검) ===\n"
         "1) API Keys & Secrets (CRITICAL)\n"
@@ -274,13 +238,7 @@ def llm_after_mask_rag(original_text: str,
         "  \"policy_citations\": [{\"source\": string, \"page\": number, \"snippet\": string}]\n"
         "}\n"
         "- code block( ``` )으로 감싸지 말고 JSON만 출력.\n"
-        "- 'policy_citations'는 실제 참고(RAG)한 문서만 포함.\n\n"
 
-        "=== 판정 가이드라인 ===\n"
-        "- 알려진 접두어(sk-, AKIA, ghp_, Bearer) 또는 라벨+리터럴(고엔트로피, 길이≥8)이면 원칙적으로 'block'.\n"
-        "- SQL 인젝션 패턴이 명백하면 'block'.\n"
-        "- 부분적 개인정보(예: 주민등록번호 일부 패턴)는 'warn' (정책에 따라 상향 가능).\n"
-        "- 변수/함수/환경변수 참조는 'allow'; 단, 디폴트에 하드코딩 리터럴이 있으면 'warn'/'block'.\n\n"
 
         "=== 예시(요약) ===\n"
         "- 차단:\n"
@@ -297,14 +255,13 @@ def llm_after_mask_rag(original_text: str,
         "=== add GUIDELINES ===\n"
         "- 정책 문서의 패턴을 **반드시** 모두 검사하세요\n"
         "- 정책 문서에 명시된 내용을 우선적으로 참고하세요\n"
-        "- 정책 문서에 없지만 보안 규정 위반이라고 생각한다면 안내 해주고 해당 내용 옆에 # 쓰고 'AI 자체 판단' 이라고 써주세요\n"
-        "- policy_citations는 실제로 참고한 정책만 포함\n"
         )
 
+
     user_message = (
-        f"다음 내용을 보안 정책 기준으로 검사해주세요:\n\n"
+        f"다음 내용을 회사 보안 정책 기준으로 검사해주세요:\n\n"
         f"```\n{original_text}\n```\n\n"
-        f"정책 문서에 정의된 모든 보안 패턴을 확인하고, 위반 사항이 있으면 상세히 보고해주세요."
+        f"회사 내부 정책 문서를 참고하여 위반 사항을 상세히 보고해주세요."
     )
 
     # 메시지 구성
@@ -314,7 +271,7 @@ def llm_after_mask_rag(original_text: str,
     ]
 
     # [수정] gpt-4.1-mini용 출력 토큰 제한(필요 시 600~900 사이로 조정 가능)
-    MAX_TOKENS_OUT = 800  # [수정]
+    MAX_TOKENS_OUT = 2000  # [수정]
 
 
     # API 호출 옵션
@@ -342,8 +299,8 @@ def llm_after_mask_rag(original_text: str,
                         },
                         "query_type": "simple",
                         "in_scope": True,
-                        "top_n_documents": 3,
-                        "strictness": 3
+                        "top_n_documents": 5,
+                        "strictness": 5
                     }
                 }
             ]

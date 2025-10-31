@@ -16,7 +16,7 @@ from azure.search.documents.indexes import SearchIndexerClient
 # 내부 모듈
 from core.loader import load_rules_from_blob
 from core.detector import detect, score, auto_mask_pairs, ai_warn_items
-from core.suggest_llm import llm_after_mask, llm_after_mask_rag, llm_after_mask_rag2  # 환경 미설정이면 None 반환
+from core.suggest_llm import llm_after_mask, llm_after_mask_rag  # 환경 미설정이면 None 반환
 from core.policy_search import search_snippets   # 환경 미설정이면 예외 -> 아래 try/except 처리
 # 함수 모음 (시간 나면 함수 내부 정리) llm_policy_query
 from core.util import test_blob_connection, test_openai_connection, test_search_connection, status_badge, decide_level, render_hits, split_hits_for_actions, code_uploaded_text
@@ -46,14 +46,14 @@ def run_analyzer_ui(kind: str):
 
     # === [변경] 입력부: email은 text_area, code는 file_uploader ===
     if kind == "email":
-        ph = "안녕하세요, KTds 000 입니다. \n\n여기에 메일 내용을 작성하거나 복사해보세요!"
+        ph = "안녕하세요, KTds 000 입니다. \n\n여기에 메일 내용을 작성하거나 복사해보세요! \n\n 텍스트가 너무 길면 오류가 발생합니다."
         default_text = ""
-        text = st.text_area("**입력 창(POC)**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
+        text = st.text_area("**Text**", default_text, height=220, placeholder=ph, key=f"input_{keyp}")
         source_name = "입력 텍스트"
     else:
         # st.caption("코드/로그/설정 파일을 업로드해 검사합니다. (.py/.log/.json/.yaml 등 텍스트 파일)")
         uploaded = st.file_uploader(
-            "분석할 파일 업로드 (.py/.log/.json/.yaml 등 텍스트 파일)",
+            "**Upload**",
             type=["txt", "py", "log", "json", "yaml", "yml", "cfg", "ini", "toml", ".env"],
             accept_multiple_files=False,
             key=f"uploader_{keyp}"
@@ -67,14 +67,18 @@ def run_analyzer_ui(kind: str):
             shown_name = (source_name[:40] + "…") if len(source_name) > 40 else source_name
             st.success(f"업로드됨: **{shown_name}**  | 사이즈: ~{len(text):,} chars")
 
-    col_a, col_c = st.columns([1, 1])
+    col_a, col_b, col_c = st.columns([1, 1, 1])
     with col_a:
-        do_llm = st.toggle("AI 검사", value=True, key=f"toggle_llm_{keyp}")
+        do_llm = st.toggle("AI 검사 (내부 정책)", value=True, key=f"toggle_llm_{keyp}")
+
+    with col_b:
+        do_rag = st.toggle("AI 검사 (하이브리드)", value=True, key=f"toggle_rag_{keyp}")
+
     with col_c:
         run_btn = st.button("검사 실행", type="primary", use_container_width=True, key=f"run_{keyp}")
 
     if not run_btn:
-        st.info("입력 후 **검사 실행**을 눌러주세요.")
+        st.success("입력 후 **검사 실행**을 눌러주세요.")
         return
 
     if not text.strip():
@@ -156,8 +160,11 @@ def run_analyzer_ui(kind: str):
         # ===== LLM 호출 (정책 유무와 무관하게 실행) =====
         try:
             with st.spinner("🔍 AI 분석 중..."):
-                # llm_result = llm_after_mask_rag(text, use_rag=True)
-                llm_result = llm_after_mask(text, grounds=grounds, locale="ko-KR")
+                if do_rag:
+                    llm_result = llm_after_mask_rag(text, grounds=grounds, use_rag=True)
+                
+                else:
+                    llm_result = llm_after_mask(text, grounds=grounds, locale="ko-KR")
 
                 # ✅ Azure Search grounds 추출
                 if llm_result and '_azure_search_grounds' in llm_result:
@@ -294,18 +301,18 @@ def run_analyzer_ui(kind: str):
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="(MVP) AI Governance Assistant", page_icon="🛡️", layout="wide")
-st.title("🛡️ AI 보안/교정/감사 Assistant 🛡️")
+st.set_page_config(page_title="(MVP) SecureAI Assistant", page_icon="🛡️", layout="wide")
+st.title("SecureAI Assistant")
 # st.caption("룰 기반 1차 필터 → AI 2차 감수 → AI Search 정책 근거 인용")
 
-tab1, tab2 = st.tabs(["📧 이메일 검사", "🧰 코드 검사"])
+tab1, tab2 = st.tabs(["📧 이메일/메시지 검사", "🧰 문서 검사(코드/로그/텍스트)"])
 
 with tab1:
-    st.write("메일/메시지 본문 등을 입력해 검사합니다.")
+    st.info("메일/메시지 본문 등을 입력해 보세요!")
     run_analyzer_ui(kind="email")
        
 with tab2:
-    st.write("코드/로그/설정 텍스트 등을 입력해 검사합니다.")
+    st.info("코드/로그/텍스트등 파일을 업로드 해보세요!")
     run_analyzer_ui(kind="code")
 
 with st.sidebar:
