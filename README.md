@@ -86,7 +86,7 @@
 --- 
 
 ## 3. 라이브 데모 화면 전환
-https://pro-osj-web-16.azurewebsites.net/
+https://pro-osj-web-16.azurewebsites.net/ << 서버 내려감
 
 --- 
 ## 🧩 4. 향후 확장 계획
